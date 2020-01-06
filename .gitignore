@@ -1,0 +1,7 @@
+
+archive data/data/*
+archive data/cache_dir
+archive data/outputs
+archive data/runs
+classifier/outputs
+classifier/cache_dir

@@ -1,7 +1,8 @@
 from simpletransformers.classification import ClassificationModel
 import json
 
-model = ClassificationModel('albert', 'outputs/', use_cuda=False)
+args = {'max_seq_length':512}
+model = ClassificationModel('roberta', 'Outputs/', use_cuda=False, args=args)
 mapping = {0:'L', 1:'LC', 2:'C', 3:'RC', 4:'R'}
 
 def read_article(file_json):
@@ -17,3 +18,13 @@ def lean(request):
     pred, _ = model.predict([sentences])
 
     return mapping[pred[0]]
+
+
+"""
+from newspaper import fulltext
+import requests
+
+html = requests.get('https://www.cnn.com/2019/12/24/health/black-market-vapes/index.html').text
+sentences = fulltext(html)
+print(model.predict([sentences]))
+"""
