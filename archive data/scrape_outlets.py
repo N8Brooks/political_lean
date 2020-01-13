@@ -1,48 +1,68 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Wed Jan  8 22:52:09 2020
-
-@author: nathan
+Driver code calls source scrape for every url in outlet_bias.csv. Uses wayback
+machine to get all articles historically. Does not do a unique article twice.
+Makes sure the article is written in english. Replaces all whitespace with a
+single space. 
 """
 
 from datetime import date, timedelta
 from tqdm import tqdm
 from newspaper import build
 from langdetect import detect
-from random import uniform
 import pandas as pd
 import multiprocessing as mp
+import tldextract
+import swifter
 import re
 import time
+import pymongo
 
-process_count = 24
-archive_max = 8
+process_count = 32
 
 min_date = date(2010, 1, 1)
-max_date = date(2020, 1, 9)
+max_date = date(2020, 1, 12)
 delta = timedelta(days = 1)
 
-# exception safe function for language detection
 def try_me(text):
+    """
+    Parameters:
+        text (str): an article's content
+    Returns:
+        str: the language of the article or xx if it wasn't able to parse
+    """
     try:
         return detect(text)
     except:
         return 'xx'
 
 def source_scrape(url):
-    # janky method to not redo stuff done
-    # helpful when you have to restart this script
-    try:
-        pd.read_csv(f'./sources/{url}.csv')
-        return
-    except:
-        pass
+    """
+    Parameters:
+        url (str): a url to get the articles for every date between min and max
+            and add them to the database. 
+    """
     
-    # df to hold articles
-    df = list()
-    # current date
-    cur_date = min_date
+    # connect to db
+    myclient = pymongo.MongoClient("mongodb://localhost:27017/")
+    mydb = myclient['outlet_data']
+    outlet = mydb[url]
+    
+    # memoize downloaded and parsed articles
+    memo = {x['_id'] for x in outlet.find()}
+    
+    # get start date (start where you left off, otherwise start at min_date)
+    try:
+        cur_date = max(x['date'] for x in outlet.find())
+    except:
+        cur_date = min_date
+    
+    # the domain of the url
+    domain = tldextract.extract(url).domain
+    
+    # where to store the articles
+    df = pd.DataFrame(columns=['content', '_id', 'date'])
     
     # loop through dates
     while cur_date <= max_date:
@@ -55,9 +75,7 @@ def source_scrape(url):
             paper = build(check, memoize_articles = False, fetch_images =False,
                           follow_meta_refresh = True, keep_article_html = True)
         
-        except Exception as e:
-            #print(e)
-            #print(f'Skipped site: {url} at {cur_date}')
+        except:
             cur_date += delta
             continue
         
@@ -66,9 +84,13 @@ def source_scrape(url):
                 # replace with original url's articles
                 a.url = a.url[-a.url[::-1].index('ptth')-4:]
                 
-                # skip if it is an archive blog or something link
-                if any(x in a.url for x in ['archive.org', 'twitter.com', 
-                                            'facebook.com', 'flipboard.com']):
+                # skip if article has already been processed - collisions okay
+                if a.url in memo:
+                    continue
+                memo.add(a.url)
+                
+                # skip if it is not from source url
+                if domain != tldextract.extract(a.url).domain:
                     continue
                 
                 # download and parse
@@ -76,31 +98,22 @@ def source_scrape(url):
                 a.parse()
                 
                 # add article as record
-                df.append({'content':re.sub('\s+', ' ', a.text),
-                           'url':a.url, 'date':pd.Timestamp(cur_date)})
+                df.loc[df.shape[0]] = [re.sub('\s+',' ',a.text),a.url,cur_date]
             
-            except Exception as e:
-                pass
-                #print(e)
-                #print(f'Skipped article: {url} at {cur_date}')
+            except:
+                continue
         
         # update cur_date
         cur_date += delta
     
-    # no articles found
-    if not df:
-        #print(f'No articles found for {url}')
-        return
-        
-    # drop duplicates
-    df = pd.DataFrame(df)
-    df = df.drop_duplicates(subset='content')
-        
     # remove non-english articles
-    df = df[df.content.apply(try_me) == 'en']
+    df = df[df['content'].swifter.allow_dask_on_strings().apply(try_me)=='en']
+
+    # convert dates to datetimes    
+    df.date = df.date.apply(lambda x: pd.Timestamp(x).to_pydatetime())
     
-    # save as csv
-    df.to_csv(f'./sources/{url}.csv')
+    # add to db
+    outlet.insert_many(df.to_dict('records'), ordered=False)
 
 if __name__ == '__main__':
     # site url, bias of site
@@ -111,8 +124,9 @@ if __name__ == '__main__':
     
     # with pool call each site
     with mp.Pool(process_count) as p:
-        results = {url:p.apply_async(source_scrape, (url,))\
-                   for url in sites.url.tolist()}
+        results = dict()
+        for url in sites.url:
+            results[url] = p.apply_async(source_scrape, (url,))
         
         # sites that are being run or have yet to run
         incomplete = sites.url.tolist()
@@ -125,6 +139,7 @@ if __name__ == '__main__':
                 try:
                     if results[x].successful(): pass
                     pbar.update()
+                    # del results[x] - are async_results gc-ed? idk ...
                 except ValueError:
                     incomp_index.append(i)
             
