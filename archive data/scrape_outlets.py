@@ -14,12 +14,12 @@ from langdetect import detect
 import pandas as pd
 import multiprocessing as mp
 import tldextract
-import swifter
 import re
 import time
 import pymongo
+import sys
 
-process_count = 32
+process_count = 8
 
 min_date = date(2010, 1, 1)
 max_date = date(2020, 1, 12)
@@ -54,7 +54,7 @@ def source_scrape(url):
     
     # get start date (start where you left off, otherwise start at min_date)
     try:
-        cur_date = max(x['date'] for x in outlet.find())
+        cur_date = max(x['date'] for x in outlet.find()).date()
     except:
         cur_date = min_date
     
@@ -107,7 +107,11 @@ def source_scrape(url):
         cur_date += delta
     
     # remove non-english articles
-    df = df[df['content'].swifter.allow_dask_on_strings().apply(try_me)=='en']
+    df = df[df['content'].apply(try_me) == 'en']
+
+    # stop if it got no articles
+    if not len(df):
+        return
 
     # convert dates to datetimes    
     df.date = df.date.apply(lambda x: pd.Timestamp(x).to_pydatetime())
@@ -116,8 +120,9 @@ def source_scrape(url):
     outlet.insert_many(df.to_dict('records'), ordered=False)
 
 if __name__ == '__main__':
-    # site url, bias of site
+    # site url, bias of site based on argv[1]
     sites = pd.read_csv('outlet_bias.csv', index_col='Unnamed: 0')
+    sites = sites[sites.bias == str(sys.argv[1])]
     
     # tqdm progress bar
     pbar = tqdm(total=len(sites))
@@ -137,7 +142,10 @@ if __name__ == '__main__':
             
             for i, x in enumerate(incomplete):
                 try:
-                    if results[x].successful(): pass
+                    if results[x].successful():
+                        pass
+                    else:
+                        results[x].get()
                     pbar.update()
                     # del results[x] - are async_results gc-ed? idk ...
                 except ValueError:
