@@ -13,29 +13,17 @@ from newspaper import build
 from langdetect import detect
 import pandas as pd
 import multiprocessing as mp
+import datetime
 import tldextract
 import re
 import time
 import pymongo
-import sys
 
-process_count = 8
+process_count = 72
 
 min_date = date(2010, 1, 1)
-max_date = date(2020, 1, 12)
+max_date = date(2020, 1, 13)
 delta = timedelta(days = 1)
-
-def try_me(text):
-    """
-    Parameters:
-        text (str): an article's content
-    Returns:
-        str: the language of the article or xx if it wasn't able to parse
-    """
-    try:
-        return detect(text)
-    except:
-        return 'xx'
 
 def source_scrape(url):
     """
@@ -62,12 +50,13 @@ def source_scrape(url):
     domain = tldextract.extract(url).domain
     
     # where to store the articles
-    df = pd.DataFrame(columns=['content', '_id', 'date'])
+    articles = list()
     
     # loop through dates
     while cur_date <= max_date:
         # date string
         tmp_date = cur_date.strftime("%Y%m%d")
+        cur_datetime = datetime.datetime.combine(cur_date, datetime.time.min)
         
         try:
             # try to find articles on wayback machine
@@ -97,41 +86,37 @@ def source_scrape(url):
                 a.download()
                 a.parse()
                 
+                # skip if it is not english
+                if detect(a.text) != 'en':
+                    continue
+                
                 # add article as record
-                df.loc[df.shape[0]] = [re.sub('\s+',' ',a.text),a.url,cur_date]
+                articles.append({'content':re.sub('\s+',' ',a.text),
+                                 '_id':a.url, 'date':cur_datetime})
             
             except:
                 continue
         
         # update cur_date
         cur_date += delta
-    
-    # remove non-english articles
-    df = df[df['content'].apply(try_me) == 'en']
 
     # stop if it got no articles
-    if not len(df):
+    if not articles:
         return
 
-    # convert dates to datetimes    
-    df.date = df.date.apply(lambda x: pd.Timestamp(x).to_pydatetime())
-    
     # add to db
-    outlet.insert_many(df.to_dict('records'), ordered=False)
+    outlet.insert_many(articles, ordered=False)
 
 if __name__ == '__main__':
     # site url, bias of site based on argv[1]
     sites = pd.read_csv('outlet_bias.csv', index_col='Unnamed: 0')
-    sites = sites[sites.bias == str(sys.argv[1])]
     
     # tqdm progress bar
     pbar = tqdm(total=len(sites))
     
     # with pool call each site
     with mp.Pool(process_count) as p:
-        results = dict()
-        for url in sites.url:
-            results[url] = p.apply_async(source_scrape, (url,))
+        results={url:p.apply_async(source_scrape, (url,)) for url in sites.url}
         
         # sites that are being run or have yet to run
         incomplete = sites.url.tolist()
@@ -141,14 +126,11 @@ if __name__ == '__main__':
             incomp_index = list()
             
             for i, x in enumerate(incomplete):
-                try:
-                    if results[x].successful():
-                        pass
-                    else:
-                        results[x].get()
+                if results[x].ready():
+                    results[x].get()
+                    pbar.set_description(x)
                     pbar.update()
-                    # del results[x] - are async_results gc-ed? idk ...
-                except ValueError:
+                else:
                     incomp_index.append(i)
             
             pbar.refresh()
